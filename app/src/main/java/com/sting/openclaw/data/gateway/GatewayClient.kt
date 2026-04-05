@@ -60,13 +60,19 @@ class GatewayClient @Inject constructor(
                 }
                 
                 override fun onMessage(webSocket: WebSocket, text: String) {
-                    scope.launch { handleMessage(text) }
+                    scope.launch {
+                        try { handleMessage(text) }
+                        catch (e: Exception) { /* ignore parse errors */ }
+                    }
                 }
                 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    _connectionState.value = ConnectionState.Error(t.message ?: "Connection failed")
+                    val msg = t.message ?: "Connection failed"
+                    _connectionState.value = ConnectionState.Error(msg)
                     scope.launch { 
-                        _events.emit(GatewayEvent(type = "error", event = "error", payload = null)) 
+                        try { 
+                            _events.emit(GatewayEvent(type = "error", event = "error", payload = null)) 
+                        } catch (ignored: Exception) { }
                     }
                 }
                 
@@ -86,10 +92,23 @@ class GatewayClient @Inject constructor(
                     }
                 }
             } catch (e: Exception) {
-                // Timeout waiting for connection
+                // Timeout waiting for connection - treat as failure
+                _connectionState.value = ConnectionState.Error("Connection timeout - check IP and port")
+                return@withContext Result.failure(Exception("Connection timeout"))
             }
             
-            Result.success(Unit)
+            // If we're still connecting after timeout, treat as failure
+            if (_connectionState.value == ConnectionState.Connecting) {
+                _connectionState.value = ConnectionState.Error("Connection timeout - check IP and port")
+                return@withContext Result.failure(Exception("Connection timeout"))
+            }
+            
+            // Check final state
+            when (_connectionState.value) {
+                is ConnectionState.Connected -> Result.success(Unit)
+                is ConnectionState.Error -> Result.failure(Exception((_connectionState.value as ConnectionState.Error).message))
+                else -> Result.failure(Exception("Connection failed"))
+            }
         } catch (e: Exception) {
             _connectionState.value = ConnectionState.Error(e.message ?: "Unknown error")
             Result.failure(e)
