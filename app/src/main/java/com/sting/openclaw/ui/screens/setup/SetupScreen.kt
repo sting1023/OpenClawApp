@@ -6,12 +6,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
@@ -69,28 +72,32 @@ class SetupViewModel @Inject constructor(
             _isLoading.value = true
             _error.value = null
             
-            val fullUrl = "${_url.value}:${_port.value}"
-            
-            val result = gatewayClient.connect(fullUrl, _token.value)
-            
-            if (result.isSuccess) {
-                _isConnected.value = true
+            try {
+                val fullUrl = "${_url.value}:${_port.value}"
                 
-                // Save gateway config
-                val gateway = GatewayConfig(
-                    id = UUID.randomUUID().toString(),
-                    name = _name.value.ifEmpty { "OpenClaw" },
-                    url = _url.value,
-                    port = _port.value.toIntOrNull() ?: 15789,
-                    token = _token.value
-                )
-                preferencesManager.saveGateway(gateway)
-                preferencesManager.setCurrentGateway(gateway.id)
-            } else {
-                _error.value = result.exceptionOrNull()?.message ?: "Connection failed"
+                val result = gatewayClient.connect(fullUrl, _token.value)
+                
+                if (result.isSuccess) {
+                    _isConnected.value = true
+                    
+                    // Save gateway config
+                    val gateway = GatewayConfig(
+                        id = UUID.randomUUID().toString(),
+                        name = _name.value.ifEmpty { "OpenClaw" },
+                        url = _url.value,
+                        port = _port.value.toIntOrNull() ?: 15789,
+                        token = _token.value
+                    )
+                    preferencesManager.saveGateway(gateway)
+                    preferencesManager.setCurrentGateway(gateway.id)
+                } else {
+                    _error.value = result.exceptionOrNull()?.message ?: "Connection failed"
+                }
+            } catch (e: Exception) {
+                _error.value = e.message ?: "Connection failed"
+            } finally {
+                _isLoading.value = false
             }
-            
-            _isLoading.value = false
         }
     }
     
@@ -122,6 +129,8 @@ fun SetupScreen(
     val error by viewModel.error.collectAsState()
     val isConnected by viewModel.isConnected.collectAsState()
     val savedGateways by viewModel.savedGateways.collectAsState()
+    
+    var passwordVisible by remember { mutableStateOf(false) }
     
     LaunchedEffect(isConnected) {
         if (isConnected) {
@@ -241,7 +250,15 @@ fun SetupScreen(
             placeholder = { Text("Your gateway token") },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
-            visualTransformation = PasswordVisualTransformation()
+            visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+            trailingIcon = {
+                IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                    Icon(
+                        imageVector = if (passwordVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                        contentDescription = if (passwordVisible) "Hide token" else "Show token"
+                    )
+                }
+            }
         )
         
         if (error != null) {
