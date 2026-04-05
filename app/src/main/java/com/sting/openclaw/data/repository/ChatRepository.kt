@@ -24,21 +24,21 @@ class ChatRepository @Inject constructor(
     private var currentSessionKey = "agent:main:main"
     
     // Expose webSocket for sending - set by GatewayClient holder
-    var webSocket: com.squareup.okhttp3.WebSocket? = null
+    var webSocket: Any? = null
     
-    fun observeChatEvents() = gatewayClient.events
-        .filter { it.event == "chat" }
-        .mapNotNull { event ->
-            try {
-                json.decodeFromString<ChatEvent>(event.payload.toString())
-            } catch (e: Exception) { null }
-        }
-    
-    private lateinit var gatewayClient: GatewayClient
+    private var gatewayClient: GatewayClient? = null
     
     fun setGatewayClient(client: GatewayClient) {
         gatewayClient = client
     }
+    
+    fun observeChatEvents() = gatewayClient?.events
+        ?.filter { it.event == "chat" }
+        ?.mapNotNull { event ->
+            try {
+                json.decodeFromString<ChatEvent>(event.payload.toString())
+            } catch (e: Exception) { null }
+        } ?: emptyFlow()
     
     suspend fun sendMessage(content: String, attachments: List<Attachment> = emptyList()): Result<String> {
         _isLoading.value = true
@@ -82,7 +82,12 @@ class ChatRepository @Inject constructor(
                 params = json.encodeToJsonElement(ChatSendParams.serializer(), params)
             )
             
-            webSocket?.send(json.encodeToString(GatewayRequest.serializer(), request))
+            // Use reflection to call send since webSocket is Any type
+            val ws = webSocket
+            if (ws != null) {
+                val method = ws.javaClass.getMethod("send", String::class.java)
+                method.invoke(ws, json.encodeToString(GatewayRequest.serializer(), request))
+            }
             Result.success(assistantMsgId)
         } catch (e: Exception) {
             _isLoading.value = false
@@ -119,7 +124,11 @@ class ChatRepository @Inject constructor(
                 params = json.encodeToJsonElement(ChatHistoryParams.serializer(), params)
             )
             
-            webSocket?.send(json.encodeToString(GatewayRequest.serializer(), request))
+            val ws = webSocket
+            if (ws != null) {
+                val method = ws.javaClass.getMethod("send", String::class.java)
+                method.invoke(ws, json.encodeToString(GatewayRequest.serializer(), request))
+            }
         } catch (e: Exception) {
             // Ignore
         }
@@ -135,7 +144,11 @@ class ChatRepository @Inject constructor(
         )
         
         return try {
-            webSocket?.send(json.encodeToString(GatewayRequest.serializer(), request))
+            val ws = webSocket
+            if (ws != null) {
+                val method = ws.javaClass.getMethod("send", String::class.java)
+                method.invoke(ws, json.encodeToString(GatewayRequest.serializer(), request))
+            }
             _isGenerating.value = false
             Result.success(Unit)
         } catch (e: Exception) {
