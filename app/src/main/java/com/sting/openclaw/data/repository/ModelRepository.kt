@@ -17,8 +17,8 @@ class ModelRepository @Inject constructor(
     private val _selectedModel = MutableStateFlow<String?>(null)
     val selectedModel: StateFlow<String?> = _selectedModel.asStateFlow()
     
-    var webSocket: com.squareup.okhttp3.WebSocket? = null
-    private lateinit var gatewayClient: GatewayClient
+    var webSocket: Any? = null
+    private var gatewayClient: GatewayClient? = null
     fun setGatewayClient(client: GatewayClient) { gatewayClient = client }
     
     suspend fun listModels(): Result<List<ModelInfo>> {
@@ -29,7 +29,11 @@ class ModelRepository @Inject constructor(
         )
         
         return try {
-            webSocket?.send(json.encodeToString(GatewayRequest.serializer(), request))
+            val ws = webSocket
+            if (ws != null) {
+                val method = ws.javaClass.getMethod("send", String::class.java)
+                method.invoke(ws, json.encodeToString(GatewayRequest.serializer(), request))
+            }
             Result.success(emptyList()) // Response handled via events
         } catch (e: Exception) {
             Result.failure(e)
