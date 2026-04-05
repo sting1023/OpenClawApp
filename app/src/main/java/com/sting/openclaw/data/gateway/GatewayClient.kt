@@ -56,7 +56,10 @@ class GatewayClient @Inject constructor(
         return@withContext try {
             val socket = client.newWebSocket(request, object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
-                    scope.launch { onConnected() }
+                    scope.launch {
+                        try { onConnected() }
+                        catch (e: Exception) { _connectionState.value = ConnectionState.Error("Connection failed: ${e.message}") }
+                    }
                 }
                 
                 override fun onMessage(webSocket: WebSocket, text: String) {
