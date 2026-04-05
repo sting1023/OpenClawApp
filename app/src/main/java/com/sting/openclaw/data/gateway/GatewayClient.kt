@@ -78,10 +78,15 @@ class GatewayClient @Inject constructor(
             
             webSocket = socket
             
-            // Wait for connection
-            delay(5000)
-            if (_connectionState.value == ConnectionState.Connecting) {
-                _connectionState.value = ConnectionState.Connected
+            // Wait for connection to complete (onConnected -> challenge -> connect -> hello-ok)
+            try {
+                withTimeout(15000) {
+                    while (_connectionState.value == ConnectionState.Connecting) {
+                        delay(100)
+                    }
+                }
+            } catch (e: Exception) {
+                // Timeout waiting for connection
             }
             
             Result.success(Unit)
@@ -92,7 +97,20 @@ class GatewayClient @Inject constructor(
     }
     
     private suspend fun onConnected() {
-        // Send connect request
+        // Wait for connect.challenge from Gateway (Protocol v3)
+        // App will send connect request when challenge is received in handleMessage()
+        try {
+            withTimeout(10000) {
+                while (_connectionState.value == ConnectionState.Connecting) {
+                    delay(100)
+                }
+            }
+        } catch (e: Exception) {
+            _connectionState.value = ConnectionState.Error("Connection timeout - no challenge received")
+        }
+    }
+    
+    private suspend fun sendConnectRequest(nonce: String? = null) {
         val connectParams = ConnectParams(
             auth = AuthToken(token = currentToken),
             role = "operator",
@@ -138,6 +156,11 @@ class GatewayClient @Inject constructor(
             
             if (event != null && event.type == "event") {
                 when (event.event) {
+                    "connect.challenge" -> {
+                        // Protocol v3: Received challenge, send connect request
+                        val nonce = event.payload?.jsonObject?.get("nonce")?.jsonPrimitive?.content
+                        sendConnectRequest(nonce)
+                    }
                     "tick" -> {
                         lastTickTs = System.currentTimeMillis()
                     }
