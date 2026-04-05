@@ -76,7 +76,12 @@ class PreferencesManager @Inject constructor(
             current.removeAll { it.id == gatewayId }
             prefs[GATEWAYS] = serializeGateways(current)
             if (prefs[CURRENT_GATEWAY_ID] == gatewayId) {
-                prefs[CURRENT_GATEWAY_ID] = current.firstOrNull()?.id
+                val nextGateway = current.firstOrNull()
+                if (nextGateway != null) {
+                    prefs[CURRENT_GATEWAY_ID] = nextGateway.id
+                } else {
+                    prefs.remove(CURRENT_GATEWAY_ID)
+                }
             }
         }
     }
