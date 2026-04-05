@@ -65,7 +65,7 @@ fun ModelPickerSheet(
                     items(models) { model ->
                         ListItem(
                             headlineContent = { Text(model.name) },
-                            supportingContent = model.provider?.let { Text(it) },
+                            supportingContent = if (model.provider != null) {{ Text(model.provider!!) }} else null,
                             trailingContent = {
                                 if (selectedModel == model.name) {
                                     Icon(
@@ -77,7 +77,7 @@ fun ModelPickerSheet(
                             },
                             modifier = Modifier.clickable { onSelect(model.name) }
                         )
-                        HorizontalDivider()
+                        Divider()
                     }
                 }
             }
