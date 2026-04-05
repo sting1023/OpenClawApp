@@ -1,4 +1,4 @@
-name: Build Signed APK
+name: Build APK
 
 on:
   push:
@@ -9,9 +9,39 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-debug:
     runs-on: ubuntu-latest
+    if: secrets.KEYSTORE_BASE64 == ''
+    
+    steps:
+      - uses: actions/checkout@v4
 
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Create local.properties
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --no-daemon --no-build-cache
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+  build-release:
+    runs-on: ubuntu-latest
+    if: secrets.KEYSTORE_BASE64 != ''
+    
     steps:
       - uses: actions/checkout@v4
 
@@ -41,21 +71,3 @@ jobs:
         with:
           name: app-release
           path: app/build/outputs/apk/release/app-release.apk
-
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    
-    steps:
-      - name: Download APK
-        uses: actions/download-artifact@v4
-        with:
-          name: app-release
-          path: .
-      
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: app-release.apk
-          token: ${{ secrets.GITHUB_TOKEN }}
