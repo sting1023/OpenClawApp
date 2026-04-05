@@ -44,11 +44,8 @@ fun OpenClawAppContent(
 ) {
     val preferences by viewModel.preferences.collectAsState(initial = null)
     
-    val darkTheme = when (preferences?.isDarkTheme) {
-        "true" -> true
-        "false" -> false
-        else -> isSystemInDarkTheme()
-    }
+    val isDarkTheme = preferences?.isDarkTheme == "true"
+    val useDarkTheme = if (preferences?.isDarkTheme != null) isDarkTheme else isSystemInDarkTheme()
     
     // Determine start destination
     val startDestination = if (preferences?.currentGatewayId != null) {
@@ -57,7 +54,7 @@ fun OpenClawAppContent(
         Screen.Setup.route
     }
     
-    OpenClawTheme(darkTheme = darkTheme) {
+    OpenClawTheme(darkTheme = useDarkTheme) {
         Surface(
             modifier = Modifier.fillMaxSize(),
             color = MaterialTheme.colorScheme.background
