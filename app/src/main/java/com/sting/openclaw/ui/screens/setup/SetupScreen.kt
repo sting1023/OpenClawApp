@@ -62,6 +62,8 @@ class SetupViewModel @Inject constructor(
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
     
+    val currentGateway = preferencesManager.currentGateway
+    
     fun updateUrl(value: String) { _url.value = value }
     fun updatePort(value: String) { _port.value = value }
     fun updateToken(value: String) { _token.value = value }
@@ -74,6 +76,7 @@ class SetupViewModel @Inject constructor(
             
             try {
                 val fullUrl = "${_url.value}:${_port.value}"
+                gatewayClient.updateConfig(fullUrl, _token.value)
                 
                 val result = gatewayClient.connect(fullUrl, _token.value)
                 
@@ -132,9 +135,23 @@ fun SetupScreen(
     
     var passwordVisible by remember { mutableStateOf(false) }
     
+    // Auto-load current gateway on startup
+    LaunchedEffect(Unit) {
+        viewModel.currentGateway.collect { gateway ->
+            if (gateway != null && url.isEmpty() && token.isEmpty()) {
+                viewModel.loadGateway(gateway)
+            }
+        }
+    }
+    
     LaunchedEffect(isConnected) {
         if (isConnected) {
-            onConnected()
+            try {
+                onConnected()
+            } catch (e: Exception) {
+                // Navigation failed, don't crash
+                e.printStackTrace()
+            }
         }
     }
     
