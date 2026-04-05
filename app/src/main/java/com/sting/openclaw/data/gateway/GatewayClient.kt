@@ -21,7 +21,9 @@ class GatewayClient @Inject constructor(
     private val json: Json
 ) {
     private var webSocket: WebSocket? = null
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
+        t.printStackTrace()
+    })
     
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -33,7 +35,6 @@ class GatewayClient @Inject constructor(
     private var currentUrl = ""
     private var currentToken = ""
     
-    // Heartbeat
     private var heartbeatJob: Job? = null
     private var lastTickTs = 0L
     
@@ -45,71 +46,76 @@ class GatewayClient @Inject constructor(
     suspend fun connect(url: String, token: String): Result<Unit> = withContext(Dispatchers.IO) {
         currentUrl = url
         currentToken = token
-        
         _connectionState.value = ConnectionState.Connecting
         
         val wsUrl = if (url.startsWith("ws://") || url.startsWith("wss://")) url else "ws://$url"
         val request = Request.Builder().url("$wsUrl/").build()
         
-        val client = OkHttpClient()
+        val client = OkHttpClient.Builder()
+            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(0, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .build()
         
-        return@withContext try {
-            val socket = client.newWebSocket(request, object : WebSocketListener() {
+        try {
+            val latch = java.util.concurrent.CountDownLatch(1)
+            var connectionResult: Result<Unit> = Result.failure(Exception("Connection not completed"))
+            
+            val listener = object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
-                    scope.launch {
-                        try { onConnected() }
-                        catch (e: Exception) { _connectionState.value = ConnectionState.Error("Connection failed: ${e.message}") }
+                    try {
+                        onConnected(webSocket)
+                        latch.countDown()
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        _connectionState.value = ConnectionState.Error("Setup failed: ${e.message}")
+                        connectionResult = Result.failure(e)
+                        latch.countDown()
                     }
                 }
                 
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     scope.launch {
-                        try { handleMessage(text) }
-                        catch (e: Exception) { /* ignore parse errors */ }
+                        try {
+                            handleMessage(text, webSocket)
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
                     }
                 }
                 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    val msg = t.message ?: "Connection failed"
-                    _connectionState.value = ConnectionState.Error(msg)
-                    scope.launch { 
-                        try { 
-                            _events.emit(GatewayEvent(type = "error", event = "error", payload = null)) 
-                        } catch (ignored: Exception) { }
-                    }
+                    try {
+                        val msg = t.message ?: "Connection failed"
+                        _connectionState.value = ConnectionState.Error(msg)
+                        connectionResult = Result.failure(Exception(msg))
+                        scope.launch { _events.emit(GatewayEvent(type="error", event="error", payload=null)) }
+                        latch.countDown()
+                    } catch (ignored: Exception) {}
                 }
                 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    _connectionState.value = ConnectionState.Disconnected
-                    stopHeartbeat()
+                    try {
+                        _connectionState.value = ConnectionState.Disconnected
+                        stopHeartbeat()
+                    } catch (ignored: Exception) {}
                 }
-            })
-            
-            webSocket = socket
-            
-            // Wait for connection to complete (onConnected -> challenge -> connect -> hello-ok)
-            try {
-                withTimeout(15000) {
-                    while (_connectionState.value == ConnectionState.Connecting) {
-                        delay(100)
-                    }
-                }
-            } catch (e: Exception) {
-                // Timeout waiting for connection - treat as failure
-                _connectionState.value = ConnectionState.Error("Connection timeout - check IP and port")
-                return@withContext Result.failure(Exception("Connection timeout"))
             }
             
-            // If we're still connecting after timeout, treat as failure
-            if (_connectionState.value == ConnectionState.Connecting) {
+            webSocket = client.newWebSocket(request, listener)
+            
+            // Wait for connection with timeout
+            val waitOk = latch.await(15, java.util.concurrent.TimeUnit.SECONDS)
+            
+            if (!waitOk) {
+                // Timeout
                 _connectionState.value = ConnectionState.Error("Connection timeout - check IP and port")
                 return@withContext Result.failure(Exception("Connection timeout"))
             }
             
             // Check final state
-            when (_connectionState.value) {
+            when (val state = _connectionState.value) {
                 is ConnectionState.Connected -> Result.success(Unit)
-                is ConnectionState.Error -> Result.failure(Exception((_connectionState.value as ConnectionState.Error).message))
+                is ConnectionState.Error -> Result.failure(Exception(state.message))
                 else -> Result.failure(Exception("Connection failed"))
             }
         } catch (e: Exception) {
@@ -118,21 +124,60 @@ class GatewayClient @Inject constructor(
         }
     }
     
-    private suspend fun onConnected() {
+    private fun onConnected(webSocket: WebSocket) {
         // Wait for connect.challenge from Gateway (Protocol v3)
-        // App will send connect request when challenge is received in handleMessage()
+        // The challenge will arrive via onMessage -> handleMessage
+    }
+    
+    private suspend fun handleMessage(text: String, webSocket: WebSocket) {
         try {
-            withTimeout(10000) {
-                while (_connectionState.value == ConnectionState.Connecting) {
-                    delay(100)
+            // Try event first
+            val event = try {
+                json.decodeFromString<GatewayEvent>(text)
+            } catch (e: Exception) { null }
+            
+            if (event != null && event.type == "event") {
+                when (event.event) {
+                    "connect.challenge" -> {
+                        val nonce = event.payload?.jsonObject?.get("nonce")?.jsonPrimitive?.content
+                        sendConnectRequest(nonce, webSocket)
+                    }
+                    "tick" -> {
+                        lastTickTs = System.currentTimeMillis()
+                    }
+                    "hello-ok" -> {
+                        _connectionState.value = ConnectionState.Connected
+                        startHeartbeat()
+                        // Complete any pending connect request
+                        pendingRequests.entries.firstOrNull { it.value.isActive }?.let {
+                            it.value.complete(GatewayResponse(type="res", id=it.key, ok=true))
+                            pendingRequests.remove(it.key)
+                        }
+                    }
+                    "error" -> {
+                        val msg = event.payload?.jsonObject?.get("message")?.jsonPrimitive?.content ?: "Unknown error"
+                        _connectionState.value = ConnectionState.Error(msg)
+                    }
                 }
+                _events.emit(event)
+                return
+            }
+            
+            // Try response
+            val response = try {
+                json.decodeFromString<GatewayResponse>(text)
+            } catch (e: Exception) { null }
+            
+            if (response != null && response.id != null) {
+                pendingRequests[response.id]?.complete(response)
+                pendingRequests.remove(response.id)
             }
         } catch (e: Exception) {
-            _connectionState.value = ConnectionState.Error("Connection timeout - no challenge received")
+            e.printStackTrace()
         }
     }
     
-    private suspend fun sendConnectRequest(nonce: String? = null) {
+    private fun sendConnectRequest(nonce: String?, webSocket: WebSocket) {
         try {
             val connectParams = ConnectParams(
                 auth = AuthToken(token = currentToken),
@@ -154,109 +199,27 @@ class GatewayClient @Inject constructor(
             pendingRequests[requestId] = deferred
             
             val jsonStr = json.encodeToString(GatewayRequest.serializer(), request)
-            webSocket?.send(jsonStr)
+            webSocket.send(jsonStr)
             
-            // Wait for hello-ok
-            try {
-                val response = withTimeout(10000) {
-                    deferred.await()
+            // Wait for hello-ok with timeout
+            scope.launch {
+                try {
+                    val response = withTimeoutOrNull(10000L) {
+                        deferred.await()
+                    }
+                    if (response?.ok == true) {
+                        _connectionState.value = ConnectionState.Connected
+                        startHeartbeat()
+                    } else {
+                        val msg = response?.error?.jsonObject?.get("message")?.jsonPrimitive?.content ?: "Authentication failed"
+                        _connectionState.value = ConnectionState.Error(msg)
+                    }
+                } catch (e: Exception) {
+                    _connectionState.value = ConnectionState.Error("No response from gateway - check token")
                 }
-                if (response.ok == true) {
-                    _connectionState.value = ConnectionState.Connected
-                    startHeartbeat()
-                } else {
-                    val errorMsg = response.error?.jsonObject?.get("message")?.jsonPrimitive?.content ?: "Authentication failed"
-                    _connectionState.value = ConnectionState.Error(errorMsg)
-                }
-            } catch (e: Exception) {
-                _connectionState.value = ConnectionState.Error("Connection timeout - no response from gateway")
             }
         } catch (e: Exception) {
             _connectionState.value = ConnectionState.Error("Failed to send connect request: ${e.message}")
-        }
-    }
-    
-    private suspend fun handleMessage(text: String) {
-        try {
-            // Try event first
-            val event = try {
-                json.decodeFromString<GatewayEvent>(text)
-            } catch (e: Exception) { null }
-            
-            if (event != null && event.type == "event") {
-                when (event.event) {
-                    "connect.challenge" -> {
-                        // Protocol v3: Received challenge, send connect request
-                        val nonce = event.payload?.jsonObject?.get("nonce")?.jsonPrimitive?.content
-                        sendConnectRequest(nonce)
-                    }
-                    "tick" -> {
-                        lastTickTs = System.currentTimeMillis()
-                    }
-                    "hello-ok" -> {
-                        // Complete pending connect request
-                        val connectEntry = pendingRequests.entries.firstOrNull { it.value.isActive }
-                        if (connectEntry != null) {
-                            connectEntry.value.complete(GatewayResponse(type = "res", id = connectEntry.key, ok = true))
-                            pendingRequests.remove(connectEntry.key)
-                        }
-                    }
-                    "error" -> {
-                        val errorMsg = event.payload?.jsonObject?.get("message")?.jsonPrimitive?.content ?: "Unknown error"
-                        _connectionState.value = ConnectionState.Error(errorMsg)
-                    }
-                }
-                _events.emit(event)
-                return
-            }
-            
-            // Try response
-            val response = try {
-                json.decodeFromString<GatewayResponse>(text)
-            } catch (e: Exception) { null }
-            
-            if (response != null && response.id != null) {
-                pendingRequests[response.id]?.complete(response)
-                pendingRequests.remove(response.id)
-            }
-        } catch (e: Exception) {
-            // Ignore parse errors
-        }
-    }
-    
-    suspend fun sendRequest(method: String, params: Map<String, Any?>): Result<String> = withContext(Dispatchers.IO) {
-        try {
-            val paramsElement = json.encodeToJsonElement(JsonObject(params.mapValues { 
-                when (val v = it.value) {
-                    is String -> JsonPrimitive(v)
-                    is Int -> JsonPrimitive(v)
-                    is Boolean -> JsonPrimitive(v)
-                    else -> JsonPrimitive("")
-                }
-            }))
-            
-            val request = GatewayRequest(
-                id = UUID.randomUUID().toString(),
-                method = method,
-                params = paramsElement
-            )
-            
-            val deferred = CompletableDeferred<GatewayResponse>()
-            pendingRequests[request.id] = deferred
-            
-            webSocket?.send(json.encodeToString(GatewayRequest.serializer(), request))
-            
-            val response = withTimeout(30000) {
-                deferred.await()
-            }
-            
-            if (response.ok == true) {
-                Result.success(request.id)
-            } else {
-                Result.failure(Exception("Request failed"))
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
         }
     }
     
@@ -268,11 +231,11 @@ class GatewayClient @Inject constructor(
     }
     
     private fun startHeartbeat() {
+        heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
             while (isActive) {
-                delay(15000) // 15s tick
+                delay(15000)
                 if (_connectionState.value == ConnectionState.Connected) {
-                    // Check for timeout (no tick for 30s)
                     if (lastTickTs > 0 && System.currentTimeMillis() - lastTickTs > 30000) {
                         _connectionState.value = ConnectionState.Error("Heartbeat timeout")
                         disconnect()
