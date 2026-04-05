@@ -23,7 +23,7 @@ data class GatewayConfig(
 data class AppPreferences(
     val currentGatewayId: String?,
     val gateways: List<GatewayConfig>,
-    val isDarkTheme: Boolean?,
+    val isDarkTheme: String?,
     val selectedModel: String?
 )
 
@@ -35,8 +35,8 @@ class PreferencesManager @Inject constructor(
     
     companion object {
         val CURRENT_GATEWAY_ID = stringPreferencesKey("current_gateway_id")
-        val GATEWAYS = stringPreferencesKey("gateways") // JSON array
-        val IS_DARK_THEME = stringPreferencesKey("is_dark_theme") // "system", "true", "false"
+        val GATEWAYS = stringPreferencesKey("gateways")
+        val IS_DARK_THEME = stringPreferencesKey("is_dark_theme")
         val SELECTED_MODEL = stringPreferencesKey("selected_model")
     }
     
@@ -107,11 +107,10 @@ class PreferencesManager @Inject constructor(
         if (json.isNullOrEmpty()) return emptyList()
         return try {
             val list = mutableListOf<GatewayConfig>()
-            // Simple JSON parsing without kotlinx.serialization dependency in DataStore
             val regex = """\{"id":"([^"]*)","name":"([^"]*)","url":"([^"]*)","port":(\d+),"token":"([^"]*)"\}""".toRegex()
             regex.findAll(json).forEach { match ->
                 val (id, name, url, port, token) = match.destructured
-                list.add(GatewayConfig(id, name, url, port, token))
+                list.add(GatewayConfig(id, name, url, port.toInt(), token))
             }
             list
         } catch (e: Exception) {
