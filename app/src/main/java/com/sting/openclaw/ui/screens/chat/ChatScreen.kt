@@ -133,7 +133,7 @@ fun ChatScreen(
                 },
                 actions = {
                     IconButton(onClick = { viewModel.showModelPicker() }) {
-                        Icon(Icons.Default.Model, contentDescription = "Switch Model")
+                        Icon(Icons.Default.Dashboard, contentDescription = "Switch Model")
                     }
                     IconButton(onClick = onNavigateToSettings) {
                         Icon(Icons.Default.Settings, contentDescription = "Settings")
