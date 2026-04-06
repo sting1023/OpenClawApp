@@ -9,86 +9,45 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
-import kotlinx.serialization.json.*
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import coil.compose.AsyncImage
-import com.sting.openclaw.data.gateway.Attachment
-import com.sting.openclaw.data.gateway.ConnectionState
-import com.sting.openclaw.data.gateway.GatewayClient
-import com.sting.openclaw.data.local.PreferencesManager
-import com.sting.openclaw.data.repository.ChatRepository
-import com.sting.openclaw.data.repository.MessageUiModel
-import com.sting.openclaw.data.repository.ModelRepository
-import com.sting.openclaw.ui.screens.models.ModelPickerSheet
+import com.sting.openclaw.data.gateway.*
+import com.sting.openclaw.data.repository.*
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.*
 import javax.inject.Inject
 
 @HiltViewModel
 class ChatViewModel @Inject constructor(
+    private val gatewayClient: GatewayClient,
     private val chatRepository: ChatRepository,
-    private val modelRepository: ModelRepository,
-    private val preferencesManager: PreferencesManager,
-    private val gatewayClient: GatewayClient
+    private val preferencesManager: PreferencesManager
 ) : ViewModel() {
     
-    val connectionState = gatewayClient.connectionState
-    val messages = chatRepository.chatMessages
-    val isLoading = chatRepository.isLoading
-    val isGenerating = chatRepository.isGenerating
-    val models = modelRepository.models
-    val selectedModel = modelRepository.selectedModel
+    val messages by chatRepository.chatMessages.collectAsState()
+    val isLoading by chatRepository.isLoading.collectAsState()
+    val isGenerating by chatRepository.isGenerating.collectAsState()
+    val connectionState by gatewayClient.connectionState.collectAsState()
     
-    private val _inputText = MutableStateFlow("")
-    val inputText: StateFlow<String> = _inputText.asStateFlow()
-    
-    private val _showModelPicker = MutableStateFlow(false)
-    val showModelPicker: StateFlow<Boolean> = _showModelPicker.asStateFlow()
-    
-    init {
-        // Collect chat events from gateway
-        viewModelScope.launch {
-            chatRepository.chatEvents.collect { event ->
-                try {
-                    val chatEvent = event
-                    // Handle streaming text
-                    chatEvent.payload?.jsonObject?.get("text")?.jsonPrimitive?.contentOrNull?.let { delta ->
-                        chatRepository.appendToMessage(delta)
-                    }
-                    // Handle done signal
-                    chatEvent.payload?.jsonObject?.get("done")?.jsonPrimitive?.booleanOrNull?.let { done ->
-                        if (done) { chatRepository.finalizeMessage() }
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-        }
-        
-        // Load history on start
-        viewModelScope.launch {
-            chatRepository.loadHistory()
-        }
-    }
+    private var _inputText = mutableStateOf("")
+    val inputText: String by _inputText
     
     fun updateInput(text: String) { _inputText.value = text }
     
     fun sendMessage() {
         val text = _inputText.value.trim()
-        if (text.isEmpty()) return
-        
+        if (text.isEmpty() || connectionState !is ConnectionState.Connected) return
         _inputText.value = ""
         viewModelScope.launch {
             chatRepository.sendMessage(text)
@@ -96,36 +55,23 @@ class ChatViewModel @Inject constructor(
     }
     
     fun abort() {
-        viewModelScope.launch {
-            chatRepository.abort()
-        }
+        viewModelScope.launch { chatRepository.abort() }
     }
     
-    fun showModelPicker() { _showModelPicker.value = true }
-    fun hideModelPicker() { _showModelPicker.value = false }
-    
-    fun selectModel(model: String) {
-        viewModelScope.launch {
-            modelRepository.setSelectedModel(model)
-            preferencesManager.setSelectedModel(model)
-            _showModelPicker.value = false
-        }
-    }
+    fun clearMessages() = chatRepository.clearMessages()
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     viewModel: ChatViewModel = hiltViewModel(),
-    onNavigateToSettings: () -> Unit
+    onDisconnect: () -> Unit = {}
 ) {
-    val connectionState by viewModel.connectionState.collectAsState()
     val messages by viewModel.messages.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val isGenerating by viewModel.isGenerating.collectAsState()
+    val connectionState by viewModel.connectionState.collectAsState()
     val inputText by viewModel.inputText.collectAsState()
-    val showModelPicker by viewModel.showModelPicker.collectAsState()
-    val selectedModel by viewModel.selectedModel.collectAsState()
     
     val listState = rememberLazyListState()
     
@@ -136,31 +82,55 @@ fun ChatScreen(
         }
     }
     
+    // Connection status
+    val statusColor = when (connectionState) {
+        is ConnectionState.Connected -> Color(0xFF4CAF50)
+        is ConnectionState.Connecting -> Color(0xFFFF9800)
+        is ConnectionState.Error -> Color(0xFFF44336)
+        else -> Color(0xFF9E9E9E)
+    }
+    val statusText = when (connectionState) {
+        is ConnectionState.Connected -> "Connected"
+        is ConnectionState.Connecting -> "Connecting..."
+        is ConnectionState.Error -> "Error: ${(connectionState as ConnectionState.Error).message}"
+        else -> "Disconnected"
+    }
+    
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .background(statusColor, RoundedCornerShape(5.dp))
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
                         Text("OpenClaw", style = MaterialTheme.typography.titleMedium)
-                        if (connectionState is ConnectionState.Connected) {
-                            Text(
-                                text = selectedModel ?: "Connected",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
                     }
                 },
                 actions = {
-                    IconButton(onClick = { viewModel.showModelPicker() }) {
-                        Icon(Icons.Default.Dashboard, contentDescription = "Switch Model")
+                    // Connection status text
+                    Text(
+                        text = statusText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = statusColor,
+                        modifier = Modifier.padding(horizontal = 8.dp)
+                    )
+                    // Abort button
+                    if (isGenerating) {
+                        IconButton(onClick = { viewModel.abort() }) {
+                            Icon(Icons.Default.Stop, contentDescription = "Stop")
+                        }
                     }
-                    IconButton(onClick = onNavigateToSettings) {
-                        Icon(Icons.Default.Settings, contentDescription = "Settings")
+                    // Disconnect
+                    IconButton(onClick = onDisconnect) {
+                        Icon(Icons.Default.Close, contentDescription = "Disconnect")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
                 )
             )
         }
@@ -170,166 +140,97 @@ fun ChatScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // Connection status banner
-            if (connectionState is ConnectionState.Connecting) {
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            } else if (connectionState is ConnectionState.Error) {
+            // Messages
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(messages) { msg ->
+                    val isUser = msg.role == "user"
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+                    ) {
+                        Card(
+                            modifier = Modifier.widthIn(max = 280.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isUser)
+                                    MaterialTheme.colorScheme.primary
+                                else
+                                    MaterialTheme.colorScheme.surfaceVariant
+                            ),
+                            shape = RoundedCornerShape(
+                                topStart = 16.dp, topEnd = 16.dp,
+                                bottomStart = if (isUser) 16.dp else 4.dp,
+                                bottomEnd = if (isUser) 4.dp else 16.dp
+                            )
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                if (msg.content.isNotEmpty()) {
+                                    Text(
+                                        text = msg.content,
+                                        color = if (isUser) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                if (msg.isStreaming) {
+                                    Text(
+                                        text = "typing...",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (isUser) Color.White.copy(alpha=0.7f)
+                                                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha=0.7f)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Error banner when disconnected
+            if (connectionState !is ConnectionState.Connected && connectionState !is ConnectionState.Connecting) {
                 Surface(
                     color = MaterialTheme.colorScheme.errorContainer,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = "Connection error: ${(connectionState as ConnectionState.Error).message}",
+                        text = "Not connected. ${if (connectionState is ConnectionState.Error) (connectionState as ConnectionState.Error).message else ""}",
                         color = MaterialTheme.colorScheme.onErrorContainer,
-                        modifier = Modifier.padding(8.dp),
+                        modifier = Modifier.padding(12.dp),
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
             }
             
-            // Messages list
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(vertical = 16.dp)
-            ) {
-                items(messages, key = { it.id }) { message ->
-                    MessageBubble(message = message)
-                }
-            }
-            
-            // Input area
+            // Input
             Surface(
-                tonalElevation = 2.dp,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                tonalElevation = 2.dp
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(8.dp)
-                        .navigationBarsPadding(),
+                        .padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     OutlinedTextField(
                         value = inputText,
                         onValueChange = { viewModel.updateInput(it) },
-                        placeholder = { Text("Type a message...") },
                         modifier = Modifier.weight(1f),
-                        maxLines = 4,
+                        placeholder = { Text("Type a message...") },
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(onSend = { viewModel.sendMessage() })
+                        keyboardActions = KeyboardActions(onSend = { viewModel.sendMessage() }),
+                        singleLine = true,
+                        enabled = connectionState is ConnectionState.Connected && !isGenerating
                     )
-                    
                     Spacer(modifier = Modifier.width(8.dp))
-                    
-                    if (isGenerating) {
-                        FilledIconButton(
-                            onClick = { viewModel.abort() },
-                            colors = IconButtonDefaults.filledIconButtonColors(
-                                containerColor = MaterialTheme.colorScheme.error
-                            )
-                        ) {
-                            Icon(Icons.Default.Stop, contentDescription = "Stop")
-                        }
-                    } else {
-                        FilledIconButton(
-                            onClick = { viewModel.sendMessage() },
-                            enabled = inputText.isNotBlank()
-                        ) {
-                            Icon(Icons.Default.Send, contentDescription = "Send")
-                        }
+                    FilledIconButton(
+                        onClick = { viewModel.sendMessage() },
+                        enabled = inputText.isNotBlank() && connectionState is ConnectionState.Connected && !isGenerating
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                     }
-                }
-            }
-        }
-    }
-    
-    // Model picker sheet
-    if (showModelPicker) {
-        ModelPickerSheet(
-            models = emptyList(),
-            selectedModel = selectedModel,
-            onSelect = { viewModel.selectModel(it) },
-            onDismiss = { viewModel.hideModelPicker() }
-        )
-    }
-}
-
-@Composable
-fun MessageBubble(message: MessageUiModel) {
-    val isUser = message.role == "user"
-    
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
-    ) {
-        Surface(
-            color = if (isUser) 
-                MaterialTheme.colorScheme.primary 
-            else 
-                MaterialTheme.colorScheme.surfaceVariant,
-            shape = RoundedCornerShape(
-                topStart = 16.dp,
-                topEnd = 16.dp,
-                bottomStart = if (isUser) 16.dp else 4.dp,
-                bottomEnd = if (isUser) 4.dp else 16.dp
-            ),
-            modifier = Modifier.widthIn(max = 300.dp)
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                Text(
-                    text = message.content,
-                    color = if (isUser) 
-                        MaterialTheme.colorScheme.onPrimary 
-                    else 
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                
-                // Render attachments (images)
-                message.attachments.forEach { attachment ->
-                    when {
-                        attachment.url != null -> {
-                            AsyncImage(
-                                model = attachment.url,
-                                contentDescription = null,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(top = 8.dp)
-                                    .clip(RoundedCornerShape(8.dp)),
-                                contentScale = ContentScale.Fit
-                            )
-                        }
-                        attachment.content != null -> {
-                            // Base64 image
-                            val mimeType = attachment.mimeType ?: "image/png"
-                            val base64Data = attachment.content
-                            val imageData = "data:$mimeType;base64,$base64Data"
-                            AsyncImage(
-                                model = imageData,
-                                contentDescription = null,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(top = 8.dp)
-                                    .clip(RoundedCornerShape(8.dp)),
-                                contentScale = ContentScale.Fit
-                            )
-                        }
-                    }
-                }
-                
-                if (message.isStreaming) {
-                    Text(
-                        text = "...",
-                        color = if (isUser) 
-                            MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.7f)
-                        else 
-                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                        modifier = Modifier.padding(top = 4.dp)
-                    )
                 }
             }
         }
