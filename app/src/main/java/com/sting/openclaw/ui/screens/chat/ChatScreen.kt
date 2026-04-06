@@ -57,6 +57,25 @@ class ChatViewModel @Inject constructor(
     val showModelPicker: StateFlow<Boolean> = _showModelPicker.asStateFlow()
     
     init {
+        // Collect chat events from gateway
+        viewModelScope.launch {
+            chatRepository.chatEvents.collect { event ->
+                try {
+                    val chatEvent = event
+                    // Handle streaming text
+                    chatEvent.payload?.jsonObject?.get("text")?.jsonPrimitive?.contentOrNull?.let { delta ->
+                        chatRepository.appendToMessage(delta)
+                    }
+                    // Handle done signal
+                    chatEvent.payload?.jsonObject?.get("done")?.jsonPrimitive?.booleanOrNull?.let { done ->
+                        if (done) { chatRepository.finalizeMessage() }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+        
         // Load history on start
         viewModelScope.launch {
             chatRepository.loadHistory()
