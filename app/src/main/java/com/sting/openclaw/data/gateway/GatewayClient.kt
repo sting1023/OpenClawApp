@@ -223,6 +223,10 @@ class GatewayClient @Inject constructor(
         }
     }
     
+
+    fun sendRawMessage(jsonStr: String) {
+        webSocket?.send(jsonStr)
+    }
     suspend fun disconnect() {
         stopHeartbeat()
         webSocket?.close(1000, "User disconnected")
