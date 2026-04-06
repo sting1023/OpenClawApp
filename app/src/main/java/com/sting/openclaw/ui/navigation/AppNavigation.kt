@@ -17,6 +17,7 @@ sealed class Screen(val route: String) {
 
 @Composable
 fun AppNavigation(
+    onDisconnect: () -> Unit
     navController: NavHostController = rememberNavController(),
     startDestination: String = Screen.Setup.route
 ) {
@@ -36,6 +37,7 @@ fun AppNavigation(
         
         composable(Screen.Chat.route) {
             ChatScreen(
+            onDisconnect = onDisconnect,
                 onNavigateToSettings = {
                     navController.navigate(Screen.Settings.route)
                 }
