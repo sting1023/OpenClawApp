@@ -37,9 +37,13 @@ object AppModule {
     
     @Provides
     @Singleton
-    fun provideChatRepository(json: Json): ChatRepository = ChatRepository(json)
+    fun provideModelRepository(json: Json): ModelRepository = ModelRepository(json)
     
+    // ChatRepository depends on GatewayClient - use lazy provider pattern
     @Provides
     @Singleton
-    fun provideModelRepository(json: Json): ModelRepository = ModelRepository(json)
+    fun provideChatRepository(
+        gatewayClient: GatewayClient,
+        json: Json
+    ): ChatRepository = ChatRepository(gatewayClient, json)
 }
