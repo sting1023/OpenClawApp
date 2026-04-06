@@ -10,6 +10,7 @@ import javax.inject.Singleton
 
 @Singleton
 class ChatRepository @Inject constructor(
+    private val gatewayClient: GatewayClient,
     private val json: Json
 ) {
     private val _chatMessages = MutableStateFlow<List<MessageUiModel>>(emptyList())
@@ -22,31 +23,22 @@ class ChatRepository @Inject constructor(
     val isGenerating: StateFlow<Boolean> = _isGenerating.asStateFlow()
     
     private var currentSessionKey = "agent:main:main"
+    private var pendingAssistantMsgId: String? = null
     
-    // Expose webSocket for sending - set by GatewayClient holder
-    var webSocket: Any? = null
+    // Expose chat events from gatewayClient
+    val chatEvents = gatewayClient.events
+        .filter { it.event == "chat" }
     
-    private var gatewayClient: GatewayClient? = null
-    
-    fun setGatewayClient(client: GatewayClient) {
-        gatewayClient = client
-    }
-    
-    fun observeChatEvents() = gatewayClient?.events
-        ?.filter { it.event == "chat" }
-        ?.mapNotNull { event ->
-            try {
-                json.decodeFromString<ChatEvent>(event.payload.toString())
-            } catch (e: Exception) { null }
-        } ?: emptyFlow()
-    
-    suspend fun sendMessage(content: String, attachments: List<Attachment> = emptyList()): Result<String> {
+    suspend fun sendMessage(content: String): Result<String> {
+        val trimmed = content.trim()
+        if (trimmed.isEmpty()) return Result.success("")
+        
         _isLoading.value = true
         
         val message = MessageContent(
             role = "user",
-            content = content,
-            attachments = attachments.ifEmpty { null }
+            content = trimmed,
+            attachments = null
         )
         
         val params = ChatSendParams(
@@ -56,16 +48,17 @@ class ChatRepository @Inject constructor(
         )
         
         // Add user message to UI
-        val userMsg = MessageUiModel(
-            id = UUID.randomUUID().toString(),
+        val userMsgId = UUID.randomUUID().toString()
+        _chatMessages.value = _chatMessages.value + MessageUiModel(
+            id = userMsgId,
             role = "user",
-            content = content,
-            attachments = attachments
+            content = trimmed,
+            attachments = emptyList()
         )
-        _chatMessages.value = _chatMessages.value + userMsg
         
-        // Add empty assistant message
+        // Add empty assistant message placeholder
         val assistantMsgId = UUID.randomUUID().toString()
+        pendingAssistantMsgId = assistantMsgId
         _chatMessages.value = _chatMessages.value + MessageUiModel(
             id = assistantMsgId,
             role = "assistant",
@@ -76,46 +69,63 @@ class ChatRepository @Inject constructor(
         _isGenerating.value = true
         
         return try {
+            val requestId = UUID.randomUUID().toString()
             val request = GatewayRequest(
-                id = UUID.randomUUID().toString(),
+                id = requestId,
                 method = "chat.send",
                 params = json.encodeToJsonElement(ChatSendParams.serializer(), params)
             )
             
-            // Use reflection to call send since webSocket is Any type
-            val ws = webSocket
-            if (ws != null) {
-                val method = ws.javaClass.getMethod("send", String::class.java)
-                method.invoke(ws, json.encodeToString(GatewayRequest.serializer(), request))
-            }
+            gatewayClient.sendRawMessage(json.encodeToString(GatewayRequest.serializer(), request))
             Result.success(assistantMsgId)
         } catch (e: Exception) {
+            e.printStackTrace()
             _isLoading.value = false
             _isGenerating.value = false
+            pendingAssistantMsgId = null
+            // Remove placeholder on failure
+            _chatMessages.value = _chatMessages.value.filter { it.id != assistantMsgId }
             Result.failure(e)
         }
     }
     
-    fun appendToMessage(messageId: String, delta: String) {
-        _chatMessages.value = _chatMessages.value.map { msg ->
-            if (msg.id == messageId) {
-                msg.copy(content = msg.content + delta)
-            } else msg
+    fun appendToMessage(delta: String) {
+        pendingAssistantMsgId?.let { id ->
+            _chatMessages.value = _chatMessages.value.map { msg ->
+                if (msg.id == id) {
+                    msg.copy(content = msg.content + delta)
+                } else msg
+            }
         }
     }
     
-    fun finalizeMessage(messageId: String) {
+    fun finalizeMessage() {
         _isLoading.value = false
         _isGenerating.value = false
-        _chatMessages.value = _chatMessages.value.map { msg ->
-            if (msg.id == messageId) {
-                msg.copy(isStreaming = false)
-            } else msg
+        pendingAssistantMsgId?.let { id ->
+            _chatMessages.value = _chatMessages.value.map { msg ->
+                if (msg.id == id) {
+                    msg.copy(isStreaming = false)
+                } else msg
+            }
         }
+        pendingAssistantMsgId = null
+    }
+    
+    fun appendErrorMessage(content: String) {
+        val id = UUID.randomUUID().toString()
+        _chatMessages.value = _chatMessages.value + MessageUiModel(
+            id = id,
+            role = "assistant",
+            content = "Error: $content",
+            attachments = emptyList(),
+            isStreaming = false
+        )
+        _isLoading.value = false
+        _isGenerating.value = false
     }
     
     suspend fun loadHistory() {
-        _isLoading.value = true
         try {
             val params = ChatHistoryParams(sessionKey = currentSessionKey, messageLimit = 50)
             val request = GatewayRequest(
@@ -123,36 +133,25 @@ class ChatRepository @Inject constructor(
                 method = "chat.history",
                 params = json.encodeToJsonElement(ChatHistoryParams.serializer(), params)
             )
-            
-            val ws = webSocket
-            if (ws != null) {
-                val method = ws.javaClass.getMethod("send", String::class.java)
-                method.invoke(ws, json.encodeToString(GatewayRequest.serializer(), request))
-            }
+            gatewayClient.sendRawMessage(json.encodeToString(GatewayRequest.serializer(), request))
         } catch (e: Exception) {
-            // Ignore
+            e.printStackTrace()
         }
-        _isLoading.value = false
     }
     
-    suspend fun abort(): Result<Unit> {
-        val params = ChatAbortParams(sessionKey = currentSessionKey)
-        val request = GatewayRequest(
-            id = UUID.randomUUID().toString(),
-            method = "chat.abort",
-            params = json.encodeToJsonElement(ChatAbortParams.serializer(), params)
-        )
-        
-        return try {
-            val ws = webSocket
-            if (ws != null) {
-                val method = ws.javaClass.getMethod("send", String::class.java)
-                method.invoke(ws, json.encodeToString(GatewayRequest.serializer(), request))
-            }
+    suspend fun abort() {
+        try {
+            val params = ChatAbortParams(sessionKey = currentSessionKey)
+            val request = GatewayRequest(
+                id = UUID.randomUUID().toString(),
+                method = "chat.abort",
+                params = json.encodeToJsonElement(ChatAbortParams.serializer(), params)
+            )
+            gatewayClient.sendRawMessage(json.encodeToString(GatewayRequest.serializer(), request))
             _isGenerating.value = false
-            Result.success(Unit)
+            finalizeMessage()
         } catch (e: Exception) {
-            Result.failure(e)
+            e.printStackTrace()
         }
     }
     
