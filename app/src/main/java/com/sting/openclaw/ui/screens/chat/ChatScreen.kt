@@ -40,8 +40,8 @@ class ChatViewModel @Inject constructor(
     val isGenerating by chatRepository.isGenerating.collectAsState()
     val connectionState by gatewayClient.connectionState.collectAsState()
     
-    private var _inputText = mutableStateOf("")
-    val inputText: String by _inputText
+    private val _inputText = kotlinx.coroutines.flow.MutableStateFlow("")
+    val inputText = _inputText.asStateFlow()
     
     fun updateInput(text: String) { _inputText.value = text }
     
