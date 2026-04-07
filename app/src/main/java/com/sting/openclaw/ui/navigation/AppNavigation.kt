@@ -1,29 +1,31 @@
 package com.sting.openclaw.ui.navigation
 
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.sting.openclaw.ui.screens.chat.ChatScreen
-import com.sting.openclaw.ui.screens.settings.SettingsScreen
 import com.sting.openclaw.ui.screens.setup.SetupScreen
 
 sealed class Screen(val route: String) {
     data object Setup : Screen("setup")
     data object Chat : Screen("chat")
-    data object Settings : Screen("settings")
 }
 
 @Composable
 fun AppNavigation(
-    onDisconnect: () -> Unit
-    navController: NavHostController = rememberNavController(),
-    startDestination: String = Screen.Setup.route
+    modifier: Modifier = Modifier,
+    startDestination: String = Screen.Setup.route,
+    onDisconnect: () -> Unit = {}
 ) {
+    val navController: NavHostController = rememberNavController()
+    
     NavHost(
         navController = navController,
-        startDestination = startDestination
+        startDestination = startDestination,
+        modifier = modifier
     ) {
         composable(Screen.Setup.route) {
             SetupScreen(
@@ -34,24 +36,12 @@ fun AppNavigation(
                 }
             )
         }
-        
         composable(Screen.Chat.route) {
             ChatScreen(
-            onDisconnect = onDisconnect,
-                onNavigateToSettings = {
-                    navController.navigate(Screen.Settings.route)
-                }
-            )
-        }
-        
-        composable(Screen.Settings.route) {
-            SettingsScreen(
-                onNavigateBack = {
-                    navController.popBackStack()
-                },
-                onDisconnected = {
+                onDisconnect = {
+                    onDisconnect()
                     navController.navigate(Screen.Setup.route) {
-                        popUpTo(0) { inclusive = true }
+                        popUpTo(Screen.Chat.route) { inclusive = true }
                     }
                 }
             )
